@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node index.js",
     "download-images": "node scripts/download-images.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start:bridge": "node iptv-bridge.js"
   },
   "keywords": [],
   "author": "",
@@ -16,6 +17,7 @@
     "axios": "^1.17.0",
     "cheerio": "^1.2.0",
     "express": "^5.2.1",
+    "ipaddr.js": "^2.5.0",
     "stremio-addon-sdk": "^1.6.10"
   }
 }

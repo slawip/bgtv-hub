@@ -121,3 +121,9 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+# Runtime catalogue cache
+/catalog-cache.json
+
+# Local development backups
+*.backup-*
+*.before-*

@@ -121,3 +121,48 @@ To install on a TV or another device on the same network, replace `localhost` wi
 | Catalog ID | `bg_tv` |
 | ID prefix | `bgtv_` |
 | Port | `7000` |
+
+---
+
+## OwnTV IPTV Bridge
+
+This project also includes an IPTV bridge that converts the BGTV channel catalogue into an M3U playlist compatible with IPTV players such as OwnTV.
+
+### Features
+
+- Generates an M3U playlist dynamically.
+- Resolves live HLS streams.
+- Proxies HLS playlists and media segments.
+- Selects the highest-bandwidth HLS variant.
+- Refreshes expired stream URLs after authentication failures.
+
+### Requirements
+
+- Node.js
+- npm
+
+### Installation
+
+Clone the repository and install dependencies:
+
+    git clone https://github.com/slawip/bgtv-stremio.git
+    cd bgtv-stremio
+    npm install
+
+### Starting the bridge
+
+    npm run start:bridge
+
+The bridge listens on port 7001.
+
+### OwnTV setup
+
+Add this playlist URL to OwnTV, replacing the IP with your computer's local IP address:
+
+    http://YOUR-PC-IP:7001/playlist.m3u
+
+Your TV and computer must be connected to the same network.
+
+### Security
+
+The bridge is intended for use on a trusted local network. Do not expose port 7001 directly to the public internet.
