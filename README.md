@@ -1,24 +1,23 @@
-# BGTV Stremio + OwnTV Bridge
+# BGTV Hub
 
-A Bulgarian live TV project combining a Stremio addon with an IPTV bridge for players such as OwnTV.
+Bulgarian live TV streaming through Stremio and IPTV players, with an integrated OwnTV bridge.
 
-Maintained by [slawip](https://github.com/slawip).
+Maintained by [Slavi](https://github.com/slawip).
 
 ## Features
 
-### Stremio Addon
+### Stremio
 - Bulgarian live TV channel catalogue.
 - Channel logos and thumbnails.
-- Fresh HLS stream URLs when playback starts.
+- Fresh HLS stream URLs on playback.
 - No account or subscription required.
 
 ### OwnTV IPTV Bridge
-- Dynamically generates an M3U playlist.
-- Resolves live HLS streams.
-- Proxies HLS playlists and media segments.
-- Selects the highest-bandwidth HLS variant.
-- Refreshes expired stream URLs after authentication failures.
-- Includes protections against unsafe external URLs and redirects.
+- Dynamically generated M3U playlist.
+- HLS playlist and media segment proxying.
+- Highest-bandwidth HLS variant selection.
+- Automatic stream URL refresh after authentication failures.
+- Protection against unsafe external URLs and redirects.
 
 ## Requirements
 
@@ -28,6 +27,30 @@ Maintained by [slawip](https://github.com/slawip).
 ## Installation
 
 ```bash
-git clone https://github.com/slawip/bgtv-stremio.git
-cd bgtv-stremio
+git clone https://github.com/slawip/bgtv-hub.git
+cd bgtv-hub
 npm install
+
+## Running the services
+
+Start the Stremio addon:
+
+```bash
+npm start
+```
+
+Start the OwnTV IPTV bridge:
+
+```bash
+node iptv-bridge.js
+```
+
+The bridge serves the playlist at `http://localhost:7001/playlist.m3u` by default.
+
+## Configuration
+
+The bridge can be configured using environment variables. Check `iptv-bridge.js` for the available options and defaults.
+
+## Credits
+
+Based on the original [BGTV Stremio](https://github.com/hjelev/bgtv-stremio) project by its original author. This fork adds the OwnTV IPTV bridge and related improvements.
