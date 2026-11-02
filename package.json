@@ -1,5 +1,5 @@
 {
-  "name": "bgtv-stremio-own-tv",
+  "name": "bgtv-hub",
   "version": "1.0.0",
   "description": "Bulgarian live TV Stremio addon with an OwnTV IPTV bridge",
   "main": "index.js",

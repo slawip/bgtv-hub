@@ -9,12 +9,12 @@ const { getCatalog, getChannelById, getStream } = require('./scraper');
 const manifest = {
   id: 'org.custom.bgtv',
   version: '1.0.0',
-  name: 'BGTV Stremio + OwnTV',
+  name: 'BGTV Hub',
   description: 'Bulgarian live TV with OwnTV IPTV bridge',
   logo: 'http://__host__/images/logo.png',
   types: ['tv'],
   catalogs: [
-    { type: 'tv', id: 'bg_tv', name: 'BGTV Stremio + OwnTV' }
+    { type: 'tv', id: 'bg_tv', name: 'BGTV Hub' }
   ],
   resources: ['catalog', 'meta', 'stream'],
   idPrefixes: ['bgtv_'],
