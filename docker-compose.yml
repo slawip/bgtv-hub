@@ -1,9 +1,48 @@
 services:
-  stremio-bgtv:
+  addon:
     build: .
-    container_name: stremio-bgtv
+    image: bgtv-hub
+    container_name: bgtv-addon
     ports:
       - "7000:7000"
-    restart: unless-stopped
     environment:
-      - PORT=7000
+      PORT: 7000
+      DATA_DIR: /data
+      SOURCE_URL: ${SOURCE_URL:-https://www.seirsanduk.online}
+      PUBLIC_BASE_URL: ${ADDON_PUBLIC_URL:-}
+      BRIDGE_URL: ${BRIDGE_PUBLIC_URL:-}
+    volumes:
+      - bgtv-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  bridge:
+    image: bgtv-hub
+    container_name: bgtv-bridge
+    command: ["node", "iptv-bridge.js"]
+    depends_on:
+      - addon
+    ports:
+      - "7001:7001"
+    environment:
+      BRIDGE_PORT: 7001
+      DATA_DIR: /data
+      SOURCE_URL: ${SOURCE_URL:-https://www.seirsanduk.online}
+      PROXY_SECRET: ${PROXY_SECRET:-}
+      PUBLIC_BASE_URL: ${BRIDGE_PUBLIC_URL:-}
+      ADDON_BASE_URL: ${ADDON_PUBLIC_URL:-}
+    volumes:
+      - bgtv-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7001/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  bgtv-data:

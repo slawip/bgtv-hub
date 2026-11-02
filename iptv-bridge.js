@@ -1,203 +1,103 @@
 'use strict';
 
 const express = require('express');
-const axios = require('axios');
-const dns = require('dns').promises;
-const ipaddr = require('ipaddr.js');
 const { pipeline } = require('stream');
-const { getCatalog, getStream } = require('./scraper');
+const config = require('./lib/config');
+const hls = require('./lib/hls');
+const { createSigner } = require('./lib/sign');
+const { safeAxiosGet } = require('./lib/safe-http');
+const { resolveOrigin } = require('./lib/origin');
+const {
+  getCatalog,
+  getChannelById,
+  getStream,
+  CHANNEL_ID_RE
+} = require('./scraper');
+
+const PORT = Number(process.env.BRIDGE_PORT) || 7001;
+const ID_PREFIX = 'bgtv_';
+
+const MAX_PLAYLIST_BYTES = 2 * 1024 * 1024;
+const REQUEST_TIMEOUT_MS = 20000;
+const IDLE_TIMEOUT_MS = 30000;
+
+const signer = createSigner(config.PROXY_SECRET);
 
 const app = express();
-const PORT = 7001;
-const SOURCE = 'https://www.seirsanduk.online/';
+app.disable('x-powered-by');
 
-const HEADERS = {
-  'User-Agent':
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-  Referer: SOURCE
-};
+const getLocalBase = req => resolveOrigin(req, PORT);
 
-const REDIRECT_CODES = new Set([301, 302, 303, 307, 308]);
-const MAX_REDIRECTS = 5;
+const makeCtx = (req, channelId) => ({
+  localBase: getLocalBase(req),
+  channelId,
+  sign: signer.sign
+});
 
-// Validate a URL and pin its connection to a verified public IP.
-async function getPublicLookup(target) {
-  if (
-    !['https:', 'http:'].includes(target.protocol) ||
-    !target.hostname ||
-    target.username ||
-    target.password
-  ) {
-    throw new Error('Invalid stream URL.');
+// Safe to place inside a quoted M3U attribute or a title line.
+const clean = value => String(value || '').replace(/[\r\n"]/g, ' ').trim();
+
+// Logos saved by the addon use a __host__ placeholder. Point those at the
+// addon when its address is known, otherwise leave the logo out.
+function resolveLogo(logo) {
+  if (!logo) return '';
+
+  if (logo.includes('http://__host__')) {
+    return config.ADDON_BASE_URL
+      ? clean(logo.replace('http://__host__', config.ADDON_BASE_URL))
+      : '';
   }
 
-  const hostname = target.hostname.replace(/^\[|\]$/g, '');
-  let addresses;
-
-  if (ipaddr.isValid(hostname)) {
-    const address = ipaddr.process(hostname);
-    addresses = [{
-      address: address.toString(),
-      family: address.kind() === 'ipv4' ? 4 : 6
-    }];
-  } else {
-    addresses = await dns.lookup(hostname, {
-      all: true,
-      verbatim: true
-    });
-  }
-
-  if (!addresses.length) {
-    throw new Error('Stream hostname did not resolve.');
-  }
-
-  // Reject the hostname if ANY resolved address is non-public.
-  for (const entry of addresses) {
-    const address = ipaddr.process(entry.address);
-
-    if (address.range() !== 'unicast') {
-      throw new Error('Stream URL resolves to a non-public IP address.');
-    }
-  }
-
-  // Pin the connection to one of the addresses we just validated.
-  const selected = addresses[0];
-
-  return (_hostname, _options, callback) => {
-    callback(null, selected.address, selected.family);
-  };
+  return clean(logo);
 }
 
-// Make an HTTP request while validating every redirect destination.
-async function safeAxiosGet(url, options = {}) {
-  let target = new URL(url);
+const fetchText = url =>
+  safeAxiosGet(url, {
+    responseType: 'text',
+    transformResponse: [data => data],
+    timeout: REQUEST_TIMEOUT_MS,
+    maxContentLength: MAX_PLAYLIST_BYTES
+  });
 
-  for (let attempt = 0; attempt <= MAX_REDIRECTS; attempt++) {
-    const lookup = await getPublicLookup(target);
+// Read a stream into a string, refusing anything over `limit` bytes.
+async function readCapped(stream, limit) {
+  const chunks = [];
+  let size = 0;
 
-    const response = await axios.get(target.href, {
-      ...options,
-      headers: options.headers || HEADERS,
-      lookup,
-      proxy: false,
-      maxRedirects: 0,
-      validateStatus: status =>
-        (status >= 200 && status < 300) ||
-        REDIRECT_CODES.has(status)
-    });
+  for await (const chunk of stream) {
+    size += chunk.length;
 
-    if (!REDIRECT_CODES.has(response.status)) {
-      response.finalUrl = target.href;
-      return response;
+    if (size > limit) {
+      stream.destroy();
+      throw new Error('Playlist is too large.');
     }
 
-    const location = response.headers.location;
-
-    if (response.data && typeof response.data.destroy === 'function') {
-      response.data.destroy();
-    }
-
-    if (!location) {
-      throw new Error('Redirect response has no destination.');
-    }
-
-    if (attempt === MAX_REDIRECTS) {
-      throw new Error('Too many stream redirects.');
-    }
-
-    target = new URL(location, target);
+    chunks.push(chunk);
   }
 
-  throw new Error('Too many stream redirects.');
+  return Buffer.concat(chunks).toString('utf8');
 }
 
-function makeProxyUrl(url, baseUrl, localBase, channelId) {
-  const absoluteUrl = new URL(url, baseUrl).href;
+// Destroy a stream that stops delivering data for `ms` milliseconds.
+function guardIdle(stream, ms) {
+  let timer;
 
-  return `${localBase}/proxy/${encodeURIComponent(channelId)}?url=${encodeURIComponent(absoluteUrl)}`;
-}
-
-// Select the highest-bandwidth HLS variant, then rewrite its URLs.
-function rewritePlaylist(content, sourceUrl, localBase, channelId) {
-  const lines = content.split(/\r?\n/);
-  const variants = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
-
-    if (!trimmed.startsWith('#EXT-X-STREAM-INF:')) {
-      continue;
-    }
-
-    const bandwidthMatch = trimmed.match(/\bBANDWIDTH=(\d+)/i);
-    const bandwidth = bandwidthMatch
-      ? Number(bandwidthMatch[1])
-      : 0;
-
-    let uriIndex = i + 1;
-
-    while (uriIndex < lines.length && !lines[uriIndex].trim()) {
-      uriIndex++;
-    }
-
-    if (
-      uriIndex < lines.length &&
-      !lines[uriIndex].trim().startsWith('#')
-    ) {
-      variants.push({
-        tagIndex: i,
-        uriIndex,
-        bandwidth
-      });
-    }
-  }
-
-  if (variants.length > 1) {
-    const best = variants.reduce((highest, current) =>
-      current.bandwidth > highest.bandwidth ? current : highest
+  const arm = () => {
+    clearTimeout(timer);
+    timer = setTimeout(
+      () => stream.destroy(new Error('Upstream stream stalled.')),
+      ms
     );
+  };
 
-    const linesToRemove = new Set();
-
-    for (const variant of variants) {
-      if (variant !== best) {
-        linesToRemove.add(variant.tagIndex);
-        linesToRemove.add(variant.uriIndex);
-      }
-    }
-
-    content = lines
-      .filter((_, index) => !linesToRemove.has(index))
-      .join('\n');
-  }
-
-  return content.split(/\r?\n/).map(line => {
-    const trimmed = line.trim();
-
-    if (!trimmed) return line;
-
-    if (trimmed.startsWith('#')) {
-      return line.replace(/URI="([^"]+)"/g, (_, uri) =>
-        `URI="${makeProxyUrl(uri, sourceUrl, localBase, channelId)}"`
-      );
-    }
-
-    return makeProxyUrl(trimmed, sourceUrl, localBase, channelId);
-  }).join('\n');
+  arm();
+  stream.on('data', arm);
+  stream.on('close', () => clearTimeout(timer));
 }
 
-function getLocalBase(req) {
-  return `${req.protocol}://${req.get('host')}`;
-}
-
-function isPlaylist(target, contentType = '') {
-  return /\.m3u8$/i.test(target.pathname) ||
-    contentType.toLowerCase().includes('mpegurl');
-}
-
-// Find the same resource in a newly resolved playlist.
+// Find the same resource again after the stream URL has been refreshed.
 async function findFreshResource(channelId, originalTarget) {
-  const freshPlaylistUrl = await getStream(channelId);
+  const freshPlaylistUrl = await getStream(channelId, { force: true });
 
   if (!freshPlaylistUrl) {
     throw new Error('Could not resolve a fresh stream URL.');
@@ -207,42 +107,29 @@ async function findFreshResource(channelId, originalTarget) {
     return freshPlaylistUrl;
   }
 
-  const response = await safeAxiosGet(freshPlaylistUrl, {
-    responseType: 'text',
-    transformResponse: [data => data],
-    timeout: 15000
-  });
+  let response = await fetchText(freshPlaylistUrl);
 
-  const originalName = originalTarget.pathname.split('/').pop();
-  const lines = response.data.split(/\r?\n/);
+  // A master playlist lists variants, not segments: follow the best variant.
+  const variantUrl = hls.pickBestVariantUrl(response.data, response.finalUrl);
 
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-
-    const candidates = [];
-
-    if (trimmed.startsWith('#')) {
-      const matches = [...trimmed.matchAll(/URI="([^"]+)"/g)];
-      for (const match of matches) candidates.push(match[1]);
-    } else {
-      candidates.push(trimmed);
-    }
-
-    for (const candidate of candidates) {
-      try {
-        const candidateUrl = new URL(candidate, response.finalUrl);
-        const candidateName = candidateUrl.pathname.split('/').pop();
-
-        if (candidateName === originalName) {
-          return candidateUrl.href;
-        }
-      } catch (_) {}
-    }
+  if (variantUrl) {
+    response = await fetchText(variantUrl);
   }
 
-  throw new Error('The original segment is no longer in the refreshed playlist.');
+  const match = hls.findResourceInPlaylist(
+    response.data,
+    response.finalUrl,
+    originalTarget.pathname
+  );
+
+  if (!match) {
+    throw new Error('The original segment is no longer in the refreshed playlist.');
+  }
+
+  return match;
 }
+
+app.get('/healthz', (_req, res) => res.type('text/plain').send('ok'));
 
 // Export the channel list as M3U.
 app.get('/playlist.m3u', async (req, res) => {
@@ -252,15 +139,14 @@ app.get('/playlist.m3u', async (req, res) => {
 
     const entries = channels.map(channel => {
       const id = channel.id.replace(/^bgtv_/, '');
-      const logo = channel.logo || '';
-      const name = channel.name.replace(/[\r\n"]/g, ' ');
 
       return (
-        `#EXTINF:-1 tvg-logo="${logo}" group-title="Bulgarian TV",${name}\n` +
+        `#EXTINF:-1 tvg-logo="${resolveLogo(channel.logo)}" group-title="Bulgarian TV",${clean(channel.name)}\n` +
         `${localBase}/play/${encodeURIComponent(id)}`
       );
     });
 
+    res.set('Cache-Control', 'no-cache');
     res.type('application/x-mpegURL');
     res.send('#EXTM3U\n' + entries.join('\n') + '\n');
   } catch (err) {
@@ -271,11 +157,15 @@ app.get('/playlist.m3u', async (req, res) => {
 
 // Resolve a BGTV channel and return its rewritten HLS playlist.
 app.get('/play/:id', async (req, res) => {
-  try {
-    const id = req.params.id;
+  const id = req.params.id;
 
-    if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
-      return res.status(400).send('Invalid channel ID');
+  if (!CHANNEL_ID_RE.test(id)) {
+    return res.status(400).send('Invalid channel ID');
+  }
+
+  try {
+    if (!(await getChannelById(ID_PREFIX + id))) {
+      return res.status(404).send('Unknown channel.');
     }
 
     const streamUrl = await getStream(id);
@@ -284,19 +174,15 @@ app.get('/play/:id', async (req, res) => {
       return res.status(502).send('Could not resolve this channel.');
     }
 
-    const response = await safeAxiosGet(streamUrl, {
-      responseType: 'text',
-      transformResponse: [data => data],
-      timeout: 20000
-    });
+    const response = await fetchText(streamUrl);
 
-    const playlist = rewritePlaylist(
+    const playlist = hls.rewritePlaylist(
       response.data,
       response.finalUrl,
-      getLocalBase(req),
-      id
+      makeCtx(req, id)
     );
 
+    res.set('Cache-Control', 'no-store');
     res.type('application/vnd.apple.mpegurl').send(playlist);
   } catch (err) {
     console.error('Playback error:', err.message);
@@ -307,55 +193,66 @@ app.get('/play/:id', async (req, res) => {
   }
 });
 
-// Proxy HLS playlists and segments, with one authentication refresh retry.
+// Proxy HLS playlists and segments. Only URLs signed by this bridge are
+// accepted, with one authentication refresh retry.
 app.get('/proxy/:id', async (req, res) => {
   const channelId = req.params.id;
-  const controller = new AbortController();
-  let clientDisconnected = false;
 
-  if (!/^[a-zA-Z0-9_-]+$/.test(channelId)) {
+  if (!CHANNEL_ID_RE.test(channelId)) {
     return res.status(400).send('Invalid channel ID');
   }
 
-  const abortUpstream = () => {
-    if (!res.writableEnded && !clientDisconnected) {
-      clientDisconnected = true;
-      controller.abort();
-    }
-  };
+  const rawUrl = req.query.url;
 
-  req.on('aborted', abortUpstream);
+  if (
+    typeof rawUrl !== 'string' ||
+    !signer.verify(channelId, rawUrl, req.query.sig)
+  ) {
+    return res.status(403).send('Forbidden');
+  }
+
+  const controller = new AbortController();
+  let clientGone = false;
 
   res.on('close', () => {
-    if (!res.writableEnded) abortUpstream();
+    if (!res.writableEnded) {
+      clientGone = true;
+      controller.abort();
+    }
   });
 
+  // Identity encoding keeps Content-Length valid for forwarded segments.
+  const upstreamHeaders = {
+    ...config.UPSTREAM_HEADERS,
+    'Accept-Encoding': 'identity'
+  };
+
+  if (typeof req.headers.range === 'string') {
+    upstreamHeaders.Range = req.headers.range;
+  }
+
+  const open = href =>
+    safeAxiosGet(href, {
+      responseType: 'stream',
+      timeout: REQUEST_TIMEOUT_MS,
+      signal: controller.signal,
+      headers: upstreamHeaders
+    });
+
   try {
-    if (typeof req.query.url !== 'string') {
-      return res.status(400).send('Invalid stream URL');
-    }
-
-    let target = new URL(req.query.url);
-
+    let target = new URL(rawUrl);
     let response;
 
     try {
-      response = await safeAxiosGet(target.href, {
-        responseType: 'stream',
-        timeout: 20000,
-        signal: controller.signal
-      });
-      target = new URL(response.finalUrl);
+      response = await open(target.href);
     } catch (err) {
       const status = err.response?.status;
 
-      if (clientDisconnected || controller.signal.aborted) return;
+      if (clientGone || controller.signal.aborted) return;
 
       if (status !== 401 && status !== 403) throw err;
 
-      if (err.response?.data?.destroy) {
-        err.response.data.destroy();
-      }
+      if (err.response?.data?.destroy) err.response.data.destroy();
 
       console.log(
         `Authentication rejected for ${channelId} (HTTP ${status}). Refreshing stream URL.`
@@ -363,58 +260,56 @@ app.get('/proxy/:id', async (req, res) => {
 
       const refreshedUrl = await findFreshResource(channelId, target);
 
-      if (clientDisconnected || controller.signal.aborted) return;
+      if (clientGone) return;
 
-      target = new URL(refreshedUrl);
-
-      response = await safeAxiosGet(target.href, {
-        responseType: 'stream',
-        timeout: 20000,
-        signal: controller.signal
-      });
-      target = new URL(response.finalUrl);
+      response = await open(refreshedUrl);
 
       console.log(`Stream refresh retry succeeded for ${channelId}.`);
     }
 
-    if (clientDisconnected || res.destroyed) {
+    target = new URL(response.finalUrl);
+
+    if (clientGone || res.destroyed) {
       response.data.destroy();
       return;
     }
 
     const contentType = response.headers['content-type'] || '';
 
-    if (isPlaylist(target, contentType)) {
-      const chunks = [];
+    if (hls.isPlaylist(target, contentType)) {
+      const content = await readCapped(response.data, MAX_PLAYLIST_BYTES);
 
-      for await (const chunk of response.data) {
-        chunks.push(chunk);
-      }
+      if (clientGone || res.destroyed) return;
 
-      if (clientDisconnected || res.destroyed) return;
-
-      const content = Buffer.concat(chunks).toString('utf8');
-
-      const rewritten = rewritePlaylist(
+      const rewritten = hls.rewritePlaylist(
         content,
         target.href,
-        getLocalBase(req),
-        channelId
+        makeCtx(req, channelId)
       );
 
+      res.set('Cache-Control', 'no-store');
       res.type('application/vnd.apple.mpegurl').send(rewritten);
       return;
     }
 
-    if (contentType) {
-      res.set('Content-Type', contentType);
+    res.status(response.status);
+
+    for (const name of [
+      'content-type',
+      'content-length',
+      'content-range',
+      'accept-ranges'
+    ]) {
+      if (response.headers[name]) res.set(name, response.headers[name]);
     }
+
+    guardIdle(response.data, IDLE_TIMEOUT_MS);
 
     pipeline(response.data, res, err => {
       if (!err) return;
 
       if (
-        clientDisconnected ||
+        clientGone ||
         controller.signal.aborted ||
         err.code === 'ERR_STREAM_PREMATURE_CLOSE'
       ) {
@@ -423,9 +318,8 @@ app.get('/proxy/:id', async (req, res) => {
 
       console.error('Stream delivery error:', err.message);
     });
-
   } catch (err) {
-    if (clientDisconnected || controller.signal.aborted) return;
+    if (clientGone || controller.signal.aborted) return;
 
     console.error('Proxy error:', err.message);
 
@@ -437,7 +331,15 @@ app.get('/proxy/:id', async (req, res) => {
   }
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`IPTV bridge running on port ${PORT}`);
-  console.log(`Playlist: http://YOUR-PC-IP:${PORT}/playlist.m3u`);
-});
+if (require.main === module) {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`IPTV bridge running on port ${PORT}`);
+    console.log(`Playlist: http://YOUR-PC-IP:${PORT}/playlist.m3u`);
+
+    if (signer.ephemeral) {
+      console.log('PROXY_SECRET is not set: using a random secret for this run.');
+    }
+  });
+}
+
+module.exports = { app };

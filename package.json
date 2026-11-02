@@ -1,13 +1,16 @@
 {
   "name": "bgtv-hub",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Bulgarian live TV Stremio addon with an OwnTV IPTV bridge",
   "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node index.js",
+    "start:bridge": "node iptv-bridge.js",
     "download-images": "node scripts/download-images.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start:bridge": "node iptv-bridge.js"
+    "test": "node --test"
   },
   "keywords": [
     "bulgarian-tv",
@@ -23,6 +26,6 @@
     "cheerio": "^1.2.0",
     "express": "^5.2.1",
     "ipaddr.js": "^2.5.0",
-    "stremio-addon-sdk": "^1.6.10"
+    "stremio-addon-sdk": "1.6.10"
   }
 }
