@@ -2,7 +2,7 @@
 
 Bulgarian live TV streaming through Stremio and IPTV players, with an integrated OwnTV bridge.
 
-Maintained by [Slavi](https://github.com/slawip).
+
 
 ## Features
 
